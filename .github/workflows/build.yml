@@ -22,7 +22,9 @@ jobs:
       - name: Package Resource Manifests and Generate APK
         run: |
           mkdir -p app/bin
-          $ANDROID_HOME/build-tools/33.0.2/aapt package -f -M app/src/main/AndroidManifest.xml -S app/src/main/res -I $ANDROID_HOME/platforms/android-33/android.jar -F app/bin/box3d-unsigned.apk
+          # Dynamic fallback lookup using system configuration environment variables
+          export BUILD_TOOLS_DIR=$(dirname $(find $ANDROID_HOME/build-tools -name aapt | head -n 1))
+          $BUILD_TOOLS_DIR/aapt package -f -M app/src/main/AndroidManifest.xml -S app/src/main/res -I $ANDROID_HOME/platforms/android-33/android.jar -F app/bin/box3d-unsigned.apk
 
       - name: Inject Shared Object Libraries into Packaged Container
         run: |
@@ -31,11 +33,11 @@ jobs:
 
       - name: Align and Sign with Automatic Debug Key
         run: |
-          $ANDROID_HOME/build-tools/33.0.2/zipalign -v 4 app/bin/box3d-unsigned.apk app/bin/box3d3-fps-tester.apk
+          export BUILD_TOOLS_DIR=$(dirname $(find $ANDROID_HOME/build-tools -name zipalign | head -n 1))
+          $BUILD_TOOLS_DIR/zipalign -v 4 app/bin/box3d-unsigned.apk app/bin/box3d3-fps-tester.apk
           
-          # Generate a throwaway debug key on the runner and sign immediately
           keytool -genkey -v -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
-          $ANDROID_HOME/build-tools/33.0.2/apksigner sign --ks debug.keystore --ks-pass pass:android app/bin/box3d3-fps-tester.apk
+          $BUILD_TOOLS_DIR/apksigner sign --ks debug.keystore --ks-pass pass:android app/bin/box3d3-fps-tester.apk
 
       - name: Archive Production Release Artifact
         uses: actions/upload-artifact@v4
