@@ -1,8 +1,10 @@
 #include <android/native_activity.h>
+#include <android/native_window.h>
 #include <android/log.h>
 #include <EGL/egl.h>
 #include <GLES2/gl2.h>
 #include <string.h>
+#include <stdlib.h>
 #include <stdio.h>
 #include <time.h>
 
@@ -21,6 +23,7 @@ typedef struct {
     struct timespec last_time;
     int frame_count;
     float current_fps;
+    int running;
 } Engine;
 
 static const char* vertex_shader_source =
@@ -75,7 +78,7 @@ void calculate_fps(Engine* engine) {
 }
 
 void draw_frame(Engine* engine) {
-    if (engine->display == NULL) return;
+    if (engine->display == NULL || engine->surface == NULL) return;
     calculate_fps(engine);
     glViewport(0, 0, engine->width, engine->height);
     glClearColor(0.05f, 0.05f, 0.05f, 1.0f);
@@ -135,44 +138,49 @@ void draw_frame(Engine* engine) {
     eglSwapBuffers(engine->display, engine->surface);
 }
 
-static void handle_cmd(struct ANativeActivity* activity, int32_t cmd) {
+static void onNativeWindowCreated(ANativeActivity* activity, ANativeWindow* window) {
     Engine* engine = (Engine*)activity->instance;
-    switch (cmd) {
-        case ANATIVEACTIVITY_CMD_INIT_WINDOW:
-            if (activity->window != NULL) {
-                const EGLint attribs[] = { EGL_SURFACE_TYPE, EGL_WINDOW_BIT, EGL_BLUE_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_RED_SIZE, 8, EGL_NONE };
-                EGLint numConfigs;
-                EGLConfig config;
-                engine->display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
-                eglInitialize(engine->display, 0, 0);
-                eglChooseConfig(engine->display, attribs, &config, 1, &numConfigs);
-                engine->surface = eglCreateWindowSurface(engine->display, config, activity->window, NULL);
-                EGLint contextAttribs[] = { EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE };
-                engine->context = eglCreateContext(engine->display, config, NULL, contextAttribs);
-                eglMakeCurrent(engine->display, engine->surface, engine->surface, engine->context);
-                eglQuerySurface(engine->display, engine->surface, EGL_WIDTH, &engine->width);
-                eglQuerySurface(engine->display, engine->surface, EGL_HEIGHT, &engine->height);
-                init_gl(engine);
-                draw_frame(engine);
-            }
-            break;
-        case ANATIVEACTIVITY_CMD_TERM_WINDOW:
-            if (engine->display != EGL_NO_DISPLAY) {
-                eglMakeCurrent(engine->display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
-                if (engine->context != EGL_NO_CONTEXT) eglDestroyContext(engine->display, engine->context);
-                if (engine->surface != EGL_NO_SURFACE) eglDestroySurface(engine->display, engine->surface);
-                eglTerminate(engine->display);
-            }
-            engine->display = EGL_NO_DISPLAY;
-            engine->context = EGL_NO_CONTEXT;
-            engine->surface = EGL_NO_SURFACE;
-            break;
+    const EGLint attribs[] = { EGL_SURFACE_TYPE, EGL_WINDOW_BIT, EGL_BLUE_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_RED_SIZE, 8, EGL_NONE };
+    EGLint numConfigs;
+    EGLConfig config;
+    engine->display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
+    eglInitialize(engine->display, 0, 0);
+    eglChooseConfig(engine->display, attribs, &config, 1, &numConfigs);
+    engine->surface = eglCreateWindowSurface(engine->display, config, window, NULL);
+    EGLint contextAttribs[] = { EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE };
+    engine->context = eglCreateContext(engine->display, config, NULL, contextAttribs);
+    eglMakeCurrent(engine->display, engine->surface, engine->surface, engine->context);
+    eglQuerySurface(engine->display, engine->surface, EGL_WIDTH, &engine->width);
+    eglQuerySurface(engine->display, engine->surface, EGL_HEIGHT, &engine->height);
+    init_gl(engine);
+    engine->running = 1;
+    draw_frame(engine);
+}
+
+static void onNativeWindowDestroyed(ANativeActivity* activity, ANativeWindow* window) {
+    Engine* engine = (Engine*)activity->instance;
+    engine->running = 0;
+    if (engine->display != EGL_NO_DISPLAY) {
+        eglMakeCurrent(engine->display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        if (engine->context != EGL_NO_CONTEXT) eglDestroyContext(engine->display, engine->context);
+        if (engine->surface != EGL_NO_SURFACE) eglDestroySurface(engine->display, engine->surface);
+        eglTerminate(engine->display);
     }
+    engine->display = EGL_NO_DISPLAY;
+    engine->context = EGL_NO_CONTEXT;
+    engine->surface = EGL_NO_SURFACE;
+}
+
+static void onDestroy(ANativeActivity* activity) {
+    Engine* engine = (Engine*)activity->instance;
+    free(engine);
 }
 
 void ANativeActivity_onCreate(ANativeActivity* activity, void* savedState, size_t savedStateSize) {
     Engine* engine = malloc(sizeof(Engine));
     memset(engine, 0, sizeof(Engine));
     activity->instance = engine;
-    activity->callbacks->onAppCmd = handle_cmd;
+    activity->callbacks->onNativeWindowCreated = onNativeWindowCreated;
+    activity->callbacks->onNativeWindowDestroyed = onNativeWindowDestroyed;
+    activity->callbacks->onDestroy = onDestroy;
 }
