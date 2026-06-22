@@ -1,0 +1,44 @@
+name: Build Box3D FPS Tester APK
+on: [push, pull_request]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Android NDK Environment
+        uses: android-actions/setup-android@v3
+        with:
+          api-level: 33
+          ndk-version: 25.2.9519653
+
+      - name: Compile Native C Binaries
+        run: |
+          cd app/jni
+          $ANDROID_NDK_HOME/ndk-build
+
+      - name: Package Resource Manifests and Generate APK
+        run: |
+          mkdir -p app/bin
+          $ANDROID_HOME/build-tools/33.0.2/aapt package -f -M app/src/main/AndroidManifest.xml -S app/src/main/res -I $ANDROID_HOME/platforms/android-33/android.jar -F app/bin/box3d-unsigned.apk
+
+      - name: Inject Shared Object Libraries into Packaged Container
+        run: |
+          cd app/libs
+          if [ -d "arm64-v8a" ]; then cd arm64-v8a && zip -g ../../bin/box3d-unsigned.apk libbox3d.so; fi
+
+      - name: Align and Sign with Automatic Debug Key
+        run: |
+          $ANDROID_HOME/build-tools/33.0.2/zipalign -v 4 app/bin/box3d-unsigned.apk app/bin/box3d3-fps-tester.apk
+          
+          # Generate a throwaway debug key on the runner and sign immediately
+          keytool -genkey -v -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+          $ANDROID_HOME/build-tools/33.0.2/apksigner sign --ks debug.keystore --ks-pass pass:android app/bin/box3d3-fps-tester.apk
+
+      - name: Archive Production Release Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: box3d3-fps-tester-apk
+          path: app/bin/box3d3-fps-tester.apk
