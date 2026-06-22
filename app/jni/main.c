@@ -8,11 +8,13 @@
 #include <stdio.h>
 #include <time.h>
 #include <math.h>
+#include <pthread.h>
 
 #define LOG_TAG "Box3D"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 
 typedef struct {
+    ANativeWindow* window;
     EGLDisplay display;
     EGLSurface surface;
     EGLContext context;
@@ -27,6 +29,7 @@ typedef struct {
     int frame_count;
     float current_fps;
     int running;
+    pthread_t render_thread;
 } Engine;
 
 static const char* vertex_shader_source =
@@ -88,27 +91,14 @@ void make_identity(float* m) {
     m[0] = m[5] = m[10] = m[15] = 1.0f;
 }
 
-void multiply_matrix(float* res, float* a, float* b) {
-    float tmp[16];
-    for (int i = 0; i < 4; i++) {
-        for (int j = 0; j < 4; j++) {
-            tmp[i * 4 + j] = a[i * 4 + 0] * b[0 + j] +
-                             a[i * 4 + 1] * b[4 + j] +
-                             a[i * 4 + 2] * b[8 + j] +
-                             a[i * 4 + 3] * b[12 + j];
-        }
-    }
-    memcpy(res, tmp, 16 * sizeof(float));
-}
-
 void draw_cube_let(Engine* engine, float tx, float ty, float tz, float* view_projection) {
     float vertices[] = {
-        -0.2f+tx, -0.2f+ty,  0.2f+tz,  0.2f+tx, -0.2f+ty,  0.2f+tz,  0.2f+tx,  0.2f+ty,  0.2f+tz, -0.2f+tx,  0.2f+ty,  0.2f+tz,
-        -0.2f+tx, -0.2f+ty, -0.2f+tz, -0.2f+tx,  0.2f+ty, -0.2f+tz,  0.2f+tx,  0.2f+ty, -0.2f+tz,  0.2f+tx, -0.2f+ty, -0.2f+tz,
-        -0.2f+tx,  0.2f+ty, -0.2f+tz, -0.2f+tx,  0.2f+ty,  0.2f+tz,  0.2f+tx,  0.2f+ty,  0.2f+tz,  0.2f+tx,  0.2f+ty, -0.2f+tz,
-        -0.2f+tx, -0.2f+ty, -0.2f+tz,  0.2f+tx, -0.2f+ty, -0.2f+tz,  0.2f+tx, -0.2f+ty,  0.2f+tz, -0.2f+tx, -0.2f+ty,  0.2f+tz,
-         0.2f+tx, -0.2f+ty, -0.2f+tz,  0.2f+tx,  0.2f+ty, -0.2f+tz,  0.2f+tx,  0.2f+ty,  0.2f+tz,  0.2f+tx, -0.2f+ty,  0.2f+tz,
-        -0.2f+tx, -0.2f+ty, -0.2f+tz, -0.2f+tx, -0.2f+ty,  0.2f+tz, -0.2f+tx,  0.2f+ty,  0.2f+tz, -0.2f+tx,  0.2f+ty, -0.2f+tz
+        -0.15f+tx, -0.15f+ty,  0.15f+tz,  0.15f+tx, -0.15f+ty,  0.15f+tz,  0.15f+tx,  0.15f+ty,  0.15f+tz, -0.15f+tx,  0.15f+ty,  0.15f+tz,
+        -0.15f+tx, -0.15f+ty, -0.15f+tz, -0.15f+tx,  0.15f+ty, -0.15f+tz,  0.15f+tx,  0.15f+ty, -0.15f+tz,  0.15f+tx, -0.15f+ty, -0.15f+tz,
+        -0.15f+tx,  0.15f+ty, -0.15f+tz, -0.15f+tx,  0.15f+ty,  0.15f+tz,  0.15f+tx,  0.15f+ty,  0.15f+tz,  0.15f+tx,  0.15f+ty, -0.15f+tz,
+        -0.15f+tx, -0.15f+ty, -0.15f+tz,  0.15f+tx, -0.15f+ty, -0.15f+tz,  0.15f+tx, -0.15f+ty,  0.15f+tz, -0.15f+tx, -0.15f+ty,  0.15f+tz,
+         0.15f+tx, -0.15f+ty, -0.15f+tz,  0.15f+tx,  0.15f+ty, -0.15f+tz,  0.15f+tx,  0.15f+ty,  0.15f+tz,  0.15f+tx, -0.15f+ty,  0.15f+tz,
+        -0.15f+tx, -0.15f+ty, -0.15f+tz, -0.15f+tx, -0.15f+ty,  0.15f+tz, -0.15f+tx,  0.15f+ty,  0.15f+tz, -0.15f+tx,  0.15f+ty, -0.15f+tz
     };
 
     float colors[] = {
@@ -134,7 +124,7 @@ void draw_cube_let(Engine* engine, float tx, float ty, float tz, float* view_pro
 }
 
 void draw_hud_digit(Engine* engine, int digit, float x, float y) {
-    float w = 0.03f, h = 0.06f;
+    float w = 0.04f, h = 0.08f;
     float segments[7][12] = {
         {x,y+h,0, x+w,y+h,0}, {x+w,y+h,0, x+w,y+h/2,0}, {x+w,y+h/2,0, x+w,y,0},
         {x,y,0, x+w,y,0}, {x,y,0, x,y+h/2,0}, {x,y+h/2,0, x,y+h,0}, {x,y+h/2,0, x+w,y+h/2,0}
@@ -160,8 +150,6 @@ void draw_hud_digit(Engine* engine, int digit, float x, float y) {
 }
 
 void draw_frame(Engine* engine) {
-    if (engine->display == NULL || engine->surface == NULL) return;
-    calculate_fps(engine);
     glViewport(0, 0, engine->width, engine->height);
     glClearColor(0.02f, 0.02f, 0.02f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -174,13 +162,20 @@ void draw_frame(Engine* engine) {
     float r[16], identity[16];
     make_identity(identity);
     memcpy(r, identity, 16*sizeof(float));
-    float angle = time * 1.0f;
-    float c = cosf(angle), s = sinf(angle);
-    r[0] = c; r[2] = s; r[5] = c; r[6] = -s; r[8] = -s; r[10] = c; // Custom 3D rotation layout
+    
+    float angleX = time * 0.8f;
+    float angleY = time * 0.5f;
+    
+    float cx = cosf(angleX), sx = sinf(angleX);
+    float cy = cosf(angleY), sy = sinf(angleY);
+    
+    r[0] = cy; r[1] = sy * sx; r[2] = sy * cx;
+    r[5] = cx; r[6] = -sx;
+    r[8] = -sy; r[9] = cy * sx; r[10] = cy * cx;
 
     float offsets[8][3] = {
-        {-0.22f,-0.22f,-0.22f}, {0.22f,-0.22f,-0.22f}, {-0.22f,0.22f,-0.22f}, {0.22f,0.22f,-0.22f},
-        {-0.22f,-0.22f,0.22f},  {0.22f,-0.22f,0.22f},  {-0.22f,0.22f,0.22f},  {0.22f,0.22f,0.22f}
+        {-0.16f,-0.16f,-0.16f}, {0.16f,-0.16f,-0.16f}, {-0.16f,0.16f,-0.16f}, {0.16f,0.16f,-0.16f},
+        {-0.16f,-0.16f,0.16f},  {0.16f,-0.16f,0.16f},  {-0.16f,0.16f,0.16f},  {0.16f,0.16f,0.16f}
     };
 
     for (int i = 0; i < 8; i++) {
@@ -189,33 +184,53 @@ void draw_frame(Engine* engine) {
 
     int fps = (int)engine->current_fps;
     draw_hud_digit(engine, (fps / 100) % 10, -0.9f, 0.8f);
-    draw_hud_digit(engine, (fps / 10) % 10, -0.85f, 0.8f);
-    draw_hud_digit(engine, fps % 10, -0.8f, 0.8f);
+    draw_hud_digit(engine, (fps / 10) % 10, -0.83f, 0.8f);
+    draw_hud_digit(engine, fps % 10, -0.76f, 0.8f);
 
     eglSwapBuffers(engine->display, engine->surface);
 }
 
-static void onNativeWindowCreated(ANativeActivity* activity, ANativeWindow* window) {
-    Engine* engine = (Engine*)activity->instance;
+static void* thread_routing_loop(void* context) {
+    Engine* engine = (Engine*)context;
+    
     const EGLint attribs[] = { EGL_SURFACE_TYPE, EGL_WINDOW_BIT, EGL_BLUE_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_RED_SIZE, 8, EGL_DEPTH_SIZE, 16, EGL_NONE };
     EGLint numConfigs;
     EGLConfig config;
     engine->display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
     eglInitialize(engine->display, 0, 0);
     eglChooseConfig(engine->display, attribs, &config, 1, &numConfigs);
-    engine->surface = eglCreateWindowSurface(engine->display, config, window, NULL);
+    engine->surface = eglCreateWindowSurface(engine->display, config, engine->window, NULL);
     EGLint contextAttribs[] = { EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE };
     engine->context = eglCreateContext(engine->display, config, NULL, contextAttribs);
     eglMakeCurrent(engine->display, engine->surface, engine->surface, engine->context);
     eglQuerySurface(engine->display, engine->surface, EGL_WIDTH, &engine->width);
     eglQuerySurface(engine->display, engine->surface, EGL_HEIGHT, &engine->height);
+    
     init_gl(engine);
+
+    while (engine->running) {
+        calculate_fps(engine);
+        draw_frame(engine);
+    }
+
+    eglMakeCurrent(engine->display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+    eglDestroyContext(engine->display, engine->context);
+    eglDestroySurface(engine->display, engine->surface);
+    eglTerminate(engine->display);
+    return NULL;
+}
+
+static void onNativeWindowCreated(ANativeActivity* activity, ANativeWindow* window) {
+    Engine* engine = (Engine*)activity->instance;
+    engine->window = window;
     engine->running = 1;
+    pthread_create(&engine->render_thread, NULL, thread_routing_loop, engine);
 }
 
 static void onNativeWindowDestroyed(ANativeActivity* activity, ANativeWindow* window) {
     Engine* engine = (Engine*)activity->instance;
     engine->running = 0;
+    pthread_join(engine->render_thread, NULL);
 }
 
 static void onDestroy(ANativeActivity* activity) {
