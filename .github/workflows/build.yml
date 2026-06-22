@@ -20,9 +20,13 @@ jobs:
           api-level: 33
           ndk-version: 25.2.9519653
 
+      - name: Setup Compatible Gradle Version
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.2
+
       - name: Build Debug Application Container
         run: |
-          chmod +x   gradlew 2>/dev/null || true
           gradle assembleDebug --no-daemon
 
       - name: Archive Production Release Artifact
