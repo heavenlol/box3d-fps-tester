@@ -14,6 +14,17 @@
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 #define GRAPH_SAMPLES 60
 
+static const unsigned char font_atlas_bits[128] = {
+    0x00, 0x00, 0x00, 0x00, 0xbd, 0x00, 0xb6, 0x00, 0x38, 0x00, 0x6c, 0x00, 0x6c, 0x00, 0x38, 0x00,
+    0x38, 0x00, 0x6c, 0x00, 0x6c, 0x00, 0x38, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x18, 0x00, 0x36, 0x00, 0x7c, 0x00, 0x66, 0x00, 0x60, 0x00, 0x3c, 0x00, 0x06, 0x00,
+    0x3e, 0x00, 0x66, 0x00, 0x3c, 0x00, 0x18, 0x00, 0x18, 0x00, 0x00, 0x00, 0x7e, 0x00, 0x00, 0x00,
+    0x3c, 0x00, 0x66, 0x00, 0x6e, 0x00, 0x7e, 0x00, 0x76, 0x00, 0x62, 0x00, 0x3c, 0x00, 0x7c, 0x00,
+    0x66, 0x00, 0x7c, 0x00, 0x66, 0x00, 0x7c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x7c, 0x00, 0x62, 0x00, 0x62, 0x00, 0x62, 0x00, 0x62, 0x00, 0x62, 0x00, 0x7c, 0x00, 0x7c, 0x00,
+    0x60, 0x00, 0x78, 0x00, 0x60, 0x00, 0x7c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+};
+
 typedef struct {
     ANativeWindow* window;
     EGLDisplay display;
@@ -21,10 +32,15 @@ typedef struct {
     EGLContext context;
     int32_t width;
     int32_t height;
-    GLuint program;
+    GLuint shader_program;
+    GLuint hud_program;
     GLuint position_loc;
     GLuint color_loc;
     GLuint mvp_loc;
+    GLuint hud_pos_loc;
+    GLuint hud_tex_loc;
+    GLuint hud_color_loc;
+    GLuint font_texture;
     struct timespec last_time;
     struct timespec start_time;
     int frame_count;
@@ -52,23 +68,70 @@ static const char* fragment_shader_source =
     "  gl_FragColor = v_color;\n"
     "}\n";
 
-GLuint load_shader(GLenum type, const char* shader_src) {
-    GLuint shader = glCreateShader(type);
-    glShaderSource(shader, 1, &shader_src, NULL);
-    glCompileShader(shader);
-    return shader;
+static const char* hud_vertex_shader =
+    "attribute vec2 a_position;\n"
+    "attribute vec2 a_texcoord;\n"
+    "varying vec2 v_texcoord;\n"
+    "void main() {\n"
+    "  gl_Position = vec4(a_position, 0.0, 1.0);\n"
+    "  v_texcoord = a_texcoord;\n"
+    "}\n";
+
+static const char* hud_fragment_shader =
+    "precision mediump float;\n"
+    "varying vec2 v_texcoord;\n"
+    "uniform sampler2D u_texture;\n"
+    "uniform vec4 u_color;\n"
+    "uniform bool u_use_texture;\n"
+    "void main() {\n"
+    "  if (u_use_texture) {\n"
+    "    float alpha = texture2D(u_texture, v_texcoord).r;\n"
+    "    gl_FragColor = vec4(u_color.rgb, alpha * u_color.a);\n"
+    "  } else {\n"
+    "    gl_FragColor = u_color;\n"
+    "  }\n"
+    "}\n";
+
+GLuint build_program(const char* v_src, const char* f_src) {
+    GLuint vs = glCreateShader(GL_VERTEX_SHADER);
+    glShaderSource(vs, 1, &v_src, NULL);
+    glCompileShader(vs);
+    GLuint fs = glCreateShader(GL_FRAGMENT_SHADER);
+    glShaderSource(fs, 1, &f_src, NULL);
+    glCompileShader(fs);
+    GLuint prog = glCreateProgram();
+    glAttachShader(prog, vs);
+    glAttachShader(prog, fs);
+    glLinkProgram(prog);
+    return prog;
 }
 
 void init_gl(Engine* engine) {
-    GLuint vertex_shader = load_shader(GL_VERTEX_SHADER, vertex_shader_source);
-    GLuint fragment_shader = load_shader(GL_FRAGMENT_SHADER, fragment_shader_source);
-    engine->program = glCreateProgram();
-    glAttachShader(engine->program, vertex_shader);
-    glAttachShader(engine->program, fragment_shader);
-    glLinkProgram(engine->program);
-    engine->position_loc = glGetAttribLocation(engine->program, "position");
-    engine->color_loc = glGetAttribLocation(engine->program, "color");
-    engine->mvp_loc = glGetUniformLocation(engine->program, "u_mvp");
+    engine->shader_program = build_program(vertex_shader_source, fragment_shader_source);
+    engine->position_loc = glGetAttribLocation(engine->shader_program, "position");
+    engine->color_loc = glGetAttribLocation(engine->shader_program, "color");
+    engine->mvp_loc = glGetUniformLocation(engine->shader_program, "u_mvp");
+
+    engine->hud_program = build_program(hud_vertex_shader, hud_fragment_shader);
+    engine->hud_pos_loc = glGetAttribLocation(engine->hud_program, "a_position");
+    engine->hud_tex_loc = glGetAttribLocation(engine->hud_program, "a_texcoord");
+    engine->hud_color_loc = glGetUniformLocation(engine->hud_program, "u_color");
+
+    glGenTextures(1, &engine->font_texture);
+    glBindTexture(GL_TEXTURE_2D, engine->font_texture);
+    
+    unsigned char pixels[16 * 16];
+    memset(pixels, 0, sizeof(pixels));
+    for (int i = 0; i < 128; i++) {
+        int r = i / 16;
+        int c = i % 16;
+        pixels[r * 16 + c] = font_atlas_bits[i];
+    }
+    
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE, 16, 16, 0, GL_LUMINANCE, GL_UNSIGNED_BYTE, pixels);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+
     clock_gettime(CLOCK_MONOTONIC, &engine->last_time);
     clock_gettime(CLOCK_MONOTONIC, &engine->start_time);
     engine->frame_count = 0;
@@ -162,107 +225,87 @@ void draw_cube_let(Engine* engine, float tx, float ty, float tz, float* view_pro
     glDrawElements(GL_TRIANGLES, 36, GL_UNSIGNED_SHORT, indices);
 }
 
-void draw_hud_digit(Engine* engine, int digit, float x, float y, float w, float h, float r, float g, float b) {
-    float segments[7][6] = {
-        {x,y+h, x+w,y+h}, {x+w,y+h, x+w,y+h/2}, {x+w,y+h/2, x+w,y},
-        {x,y, x+w,y}, {x,y, x,y+h/2}, {x,y+h/2, x,y+h}, {x,y+h/2, x+w,y+h/2}
-    };
-    int patterns[10][7] = {
-        {1,1,1,1,1,1,0}, {0,1,1,0,0,0,0}, {1,1,0,1,1,0,1}, {1,1,1,1,0,0,1}, {0,1,1,0,0,1,1},
-        {1,0,1,1,0,1,1}, {1,0,1,1,1,1,1}, {1,1,1,0,0,0,0}, {1,1,1,1,1,1,1}, {1,1,1,1,0,1,1}
-    };
-    float color[8] = {r,g,b,1.0f, r,g,b,1.0f};
-    glVertexAttribPointer(engine->color_loc, 4, GL_FLOAT, GL_FALSE, 0, color);
-    glEnableVertexAttribArray(engine->color_loc);
+void draw_text(Engine* engine, const char* str, float x, float y, float size_w, float size_h) {
+    glUniform1i(glGetUniformLocation(engine->hud_program, "u_use_texture"), 1);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, engine->font_texture);
+    glUniform1i(glGetUniformLocation(engine->hud_program, "u_texture"), 0);
 
-    for (int i = 0; i < 7; i++) {
-        if (patterns[digit][i]) {
-            glVertexAttribPointer(engine->position_loc, 2, GL_FLOAT, GL_FALSE, 0, segments[i]);
-            glEnableVertexAttribArray(engine->position_loc);
-            glDrawArrays(GL_LINES, 0, 2);
-        }
+    float cx = x;
+    while (*str) {
+        char c = *str++;
+        int idx = 0;
+        if (c >= 'A' && c <= 'Z') idx = c - 'A';
+        else if (c >= '0' && c <= '9') idx = 26 + (c - '0');
+        else if (c == ':') idx = 36;
+        else if (c == '.') idx = 37;
+        else if (c == ' ') { cx += size_w; continue; }
+
+        float tx = (idx % 16) / 16.0f;
+        float ty = (idx / 16) / 16.0f;
+        float tw = 1.0f / 16.0f;
+
+        float vertices[] = {
+            cx, y,          tx, ty + tw,
+            cx + size_w, y,  tx + tw, ty + tw,
+            cx, y + size_h, tx, ty,
+            cx + size_w, y + size_h, tx + tw, ty
+        };
+
+        glVertexAttribPointer(engine->hud_pos_loc, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), vertices);
+        glEnableVertexAttribArray(engine->hud_pos_loc);
+        glVertexAttribPointer(engine->hud_tex_loc, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), &vertices[2]);
+        glEnableVertexAttribArray(engine->hud_tex_loc);
+
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+        cx += size_w * 1.1f;
     }
-}
-
-void draw_hud_label_fps(Engine* engine, float x, float y, float w, float h) {
-    float space = w * 1.5f;
-    float f_seg[][4] = {{x,y, x,y+h}, {x,y+h, x+w,y+h}, {x,y+h/2, x+w,y+h/2}};
-    float color[8] = {0.0f,0.9f,0.4f,1.0f, 0.0f,0.9f,0.4f,1.0f};
-    glVertexAttribPointer(engine->color_loc, 4, GL_FLOAT, GL_FALSE, 0, color);
-    glEnableVertexAttribArray(engine->color_loc);
-    for(int i=0; i<3; i++) { glVertexAttribPointer(engine->position_loc, 2, GL_FLOAT, GL_FALSE, 0, f_seg[i]); glDrawArrays(GL_LINES, 0, 2); }
-    
-    x += space;
-    float p_seg[][4] = {{x,y, x,y+h}, {x,y+h, x+w,y+h}, {x,y+h/2, x+w,y+h/2}, {x+w,y+h/2, x+w,y+h}};
-    for(int i=0; i<4; i++) { glVertexAttribPointer(engine->position_loc, 2, GL_FLOAT, GL_FALSE, 0, p_seg[i]); glDrawArrays(GL_LINES, 0, 2); }
-    
-    x += space;
-    float s_seg[][4] = {{x,y+h, x+w,y+h}, {x,y+h, x,y+h/2}, {x,y+h/2, x+w,y+h/2}, {x+w,y+h/2, x+w,y}, {x+w,y, x,y}};
-    for(int i=0; i<5; i++) { glVertexAttribPointer(engine->position_loc, 2, GL_FLOAT, GL_FALSE, 0, s_seg[i]); glDrawArrays(GL_LINES, 0, 2); }
 }
 
 void draw_mangohud(Engine* engine, int fps, float dt_ms) {
     glDisable(GL_DEPTH_TEST);
-    float identity[16];
-    make_identity(identity);
-    glUniformMatrix4fv(engine->mvp_loc, 1, GL_FALSE, identity);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glUseProgram(engine->hud_program);
 
-    float box_vertices[] = {
-        -0.95f, 0.95f,   -0.45f, 0.95f,
-        -0.45f, 0.95f,   -0.45f, 0.45f,
-        -0.45f, 0.45f,   -0.95f, 0.45f,
-        -0.95f, 0.45f,   -0.95f, 0.95f
+    glUniform1i(glGetUniformLocation(engine->hud_program, "u_use_texture"), 0);
+    float bg_vertices[] = {
+        -0.95f, 0.45f,
+         0.45f, 0.45f,
+        -0.95f, 0.95f,
+         0.45f, 0.95f
     };
-    float box_color[] = {0.1f,0.1f,0.1f,0.8f, 0.1f,0.1f,0.1f,0.8f};
-    glVertexAttribPointer(engine->color_loc, 4, GL_FLOAT, GL_FALSE, 0, box_color);
-    glEnableVertexAttribArray(engine->color_loc);
-    glVertexAttribPointer(engine->position_loc, 2, GL_FLOAT, GL_FALSE, 0, box_vertices);
-    glEnableVertexAttribArray(engine->position_loc);
-    glDrawArrays(GL_LINES, 0, 8);
+    glUniform4f(engine->hud_color_loc, 0.08f, 0.08f, 0.08f, 0.85f);
+    glVertexAttribPointer(engine->hud_pos_loc, 2, GL_FLOAT, GL_FALSE, 0, bg_vertices);
+    glEnableVertexAttribArray(engine->hud_pos_loc);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
 
-    draw_hud_label_fps(engine, -0.92f, 0.85f, 0.02f, 0.04f);
+    char buf[64];
+    glUniform4f(engine->hud_color_loc, 0.0f, 0.9f, 0.4f, 1.0f);
+    draw_text(engine, "ADRENO TM 710", -0.92f, 0.88f, 0.04f, 0.05f);
 
-    float text_r = 0.0f, text_g = 0.85f, text_b = 0.95f;
-    draw_hud_digit(engine, (fps / 100) % 10, -0.75f, 0.85f, 0.02f, 0.04f, text_r, text_g, text_b);
-    draw_hud_digit(engine, (fps / 10) % 10, -0.71f, 0.85f, 0.02f, 0.04f, text_r, text_g, text_b);
-    draw_hud_digit(engine, fps % 10, -0.67f, 0.85f, 0.02f, 0.04f, text_r, text_g, text_b);
+    snprintf(buf, sizeof(buf), "FPS: %d", fps);
+    glUniform4f(engine->hud_color_loc, 0.0f, 0.85f, 0.95f, 1.0f);
+    draw_text(engine, buf, -0.92f, 0.80f, 0.04f, 0.05f);
 
-    int ms_int = (int)dt_ms;
-    int ms_frac = (int)((dt_ms - ms_int) * 10);
-    draw_hud_digit(engine, (ms_int / 10) % 10, -0.92f, 0.77f, 0.015f, 0.03f, 0.9f, 0.9f, 0.2f);
-    draw_hud_digit(engine, ms_int % 10, -0.89f, 0.77f, 0.015f, 0.03f, 0.9f, 0.9f, 0.2f);
-    
-    float dot[] = {-0.865f, 0.77f, -0.865f, 0.775f};
-    float dot_color[] = {0.9f,0.9f,0.2f,1.0f, 0.9f,0.9f,0.2f,1.0f};
-    glVertexAttribPointer(engine->color_loc, 4, GL_FLOAT, GL_FALSE, 0, dot_color);
-    glVertexAttribPointer(engine->position_loc, 2, GL_FLOAT, GL_FALSE, 0, dot);
-    glDrawArrays(GL_LINES, 0, 2);
-    
-    draw_hud_digit(engine, ms_frac % 10, -0.85f, 0.77f, 0.015f, 0.03f, 0.9f, 0.9f, 0.2f);
+    snprintf(buf, sizeof(buf), "FRAMETIME: %.1f MS", dt_ms);
+    glUniform4f(engine->hud_color_loc, 0.9f, 0.9f, 0.2f, 1.0f);
+    draw_text(engine, buf, -0.92f, 0.72f, 0.035f, 0.045f);
 
     float graph_left = -0.92f;
-    float graph_width = 0.44f;
-    float graph_bottom = 0.50f;
-    float graph_height = 0.20f;
+    float graph_width = 1.3f;
+    float graph_bottom = 0.48f;
+    float graph_height = 0.18f;
 
-    float axis_vertices[] = {
-        graph_left, graph_bottom, graph_left + graph_width, graph_bottom,
-        graph_left, graph_bottom, graph_left, graph_bottom + graph_height
-    };
-    float axis_color[] = {0.4f,0.4f,0.4f,1.0f, 0.4f,0.4f,0.4f,1.0f};
-    glVertexAttribPointer(engine->color_loc, 4, GL_FLOAT, GL_FALSE, 0, axis_color);
-    glVertexAttribPointer(engine->position_loc, 2, GL_FLOAT, GL_FALSE, 0, axis_vertices);
-    glDrawArrays(GL_LINES, 0, 4);
-
-    float line_color[] = {0.0f,0.9f,0.4f,1.0f, 0.0f,0.9f,0.4f,1.0f};
-    glVertexAttribPointer(engine->color_loc, 4, GL_FLOAT, GL_FALSE, 0, line_color);
+    glUniform1i(glGetUniformLocation(engine->hud_program, "u_use_texture"), 0);
+    glUniform4f(engine->hud_color_loc, 0.0f, 0.9f, 0.4f, 1.0f);
 
     float dx = graph_width / (GRAPH_SAMPLES - 1);
     for (int i = 0; i < GRAPH_SAMPLES - 1; i++) {
         int idx1 = (engine->graph_index + i) % GRAPH_SAMPLES;
         int idx2 = (engine->graph_index + i + 1) % GRAPH_SAMPLES;
 
-        float val1 = engine->frame_times[idx1] / 33.33f; 
+        float val1 = engine->frame_times[idx1] / 33.33f;
         float val2 = engine->frame_times[idx2] / 33.33f;
         if (val1 > 1.0f) val1 = 1.0f;
         if (val2 > 1.0f) val2 = 1.0f;
@@ -273,9 +316,11 @@ void draw_mangohud(Engine* engine, int fps, float dt_ms) {
         float y2 = graph_bottom + val2 * graph_height;
 
         float segment[] = {x1, y1, x2, y2};
-        glVertexAttribPointer(engine->position_loc, 2, GL_FLOAT, GL_FALSE, 0, segment);
+        glVertexAttribPointer(engine->hud_pos_loc, 2, GL_FLOAT, GL_FALSE, 0, segment);
         glDrawArrays(GL_LINES, 0, 2);
     }
+
+    glDisable(GL_BLEND);
     glEnable(GL_DEPTH_TEST);
 }
 
@@ -284,9 +329,10 @@ void draw_frame(Engine* engine) {
     calculate_fps(engine, &dt_ms);
 
     glViewport(0, 0, engine->width, engine->height);
-    glClearColor(0.35f, 0.35f, 0.35f, 1.0f);
+    glClearColor(0.2f, 0.2f, 0.2f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-    glUseProgram(engine->program);
+    
+    glUseProgram(engine->shader_program);
 
     struct timespec curr;
     clock_gettime(CLOCK_MONOTONIC, &curr);
@@ -297,8 +343,8 @@ void draw_frame(Engine* engine) {
     perspective_matrix(projection, 45.0f, aspect, 0.1f, 10.0f);
 
     make_identity(modelview);
-    float angleX = time * 0.7f;
-    float angleY = time * 0.9f;
+    float angleX = time * 0.5f;
+    float angleY = time * 0.6f;
     
     float cx = cosf(angleX), sx = sinf(angleX);
     float cy = cosf(angleY), sy = sinf(angleY);
@@ -306,11 +352,11 @@ void draw_frame(Engine* engine) {
     modelview[0] = cy; modelview[1] = sy * sx; modelview[2] = sy * cx;
     modelview[5] = cx; modelview[6] = -sx;
     modelview[8] = -sy; modelview[9] = cy * sx; modelview[10] = cy * cx;
-    modelview[14] = -2.2f;
+    modelview[14] = -2.5f;
 
     multiply_matrix(mvp, projection, modelview);
 
-    float gap = 0.205f;
+    float gap = 0.22f;
     float offsets[8][3] = {
         {-gap,-gap,-gap}, {gap,-gap,-gap}, {-gap,gap,-gap}, {gap,gap,-gap},
         {-gap,-gap,gap},  {gap,-gap,gap},  {-gap,gap,gap},  {gap,gap,gap}
