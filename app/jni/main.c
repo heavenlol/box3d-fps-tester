@@ -13,6 +13,12 @@
 #define LOG_TAG "Box3D"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 
+#define STB_TRUETYPE_IMPLEMENTATION
+#include "stb_truetype.h"
+
+#define ATLAS_W 512
+#define ATLAS_H 512
+
 typedef struct {
     ANativeWindow* window;
     EGLDisplay display;
@@ -24,6 +30,14 @@ typedef struct {
     GLuint position_loc;
     GLuint color_loc;
     GLuint mvp_loc;
+    
+    GLuint text_program;
+    GLuint text_pos_loc;
+    GLuint text_tex_loc;
+    GLuint text_color_uniform;
+    GLuint font_texture;
+    stbtt_bakedchar baked_chars[96];
+
     struct timespec last_time;
     struct timespec start_time;
     int frame_count;
@@ -49,6 +63,39 @@ static const char* fragment_shader_source =
     "  gl_FragColor = v_color;\n"
     "}\n";
 
+static const char* text_vertex_shader =
+    "attribute vec2 position;\n"
+    "attribute vec2 texcoord;\n"
+    "varying vec2 v_texcoord;\n"
+    "void main() {\n"
+    "  gl_Position = vec4(position, 0.0, 1.0);\n"
+    "  v_texcoord = texcoord;\n"
+    "}\n";
+
+static const char* text_fragment_shader =
+    "precision mediump float;\n"
+    "varying vec2 v_texcoord;\n"
+    "uniform sampler2D u_texture;\n"
+    "uniform vec4 u_color;\n"
+    "void main() {\n"
+    "  float mask = texture2D(u_texture, v_texcoord).r;\n"
+    "  gl_FragColor = vec4(u_color.rgb, u_color.a * mask);\n"
+    "}\n";
+
+static const unsigned char ttf_fallback[164] = {
+    0x00,0x01,0x00,0x00,0x00,0x03,0x00,0x20,0x00,0x00,0x00,0x04,0x63,0x6d,0x61,0x70,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x3c,0x00,0x00,0x00,0x24,0x67,0x6c,0x79,0x66,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x60,0x00,0x00,0x00,0x24,0x68,0x65,0x61,0x64,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x84,0x00,0x00,0x00,0x36,0x00,0x01,0x00,0x00,
+    0x00,0x01,0x00,0x00,0x00,0x00,0x00,0x14,0x00,0x03,0x00,0x00,0x00,0x00,0x00,0x10,
+    0x00,0x04,0x00,0x0c,0x00,0x00,0x00,0x04,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x01,0x00,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x04,0x00,0x01,0x00,0x00,
+    0x00,0x01,0x00,0x00,0x00,0x00,0x00,0x10,0x00,0x01,0x00,0x00,0x00,0x00,0x00,0x04,
+    0x00,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00
+};
+
 GLuint load_shader(GLenum type, const char* shader_src) {
     GLuint shader = glCreateShader(type);
     glShaderSource(shader, 1, &shader_src, NULL);
@@ -66,6 +113,33 @@ void init_gl(Engine* engine) {
     engine->position_loc = glGetAttribLocation(engine->program, "position");
     engine->color_loc = glGetAttribLocation(engine->program, "color");
     engine->mvp_loc = glGetUniformLocation(engine->program, "u_mvp");
+
+    GLuint text_vs = load_shader(GL_VERTEX_SHADER, text_vertex_shader);
+    GLuint text_fs = load_shader(GL_FRAGMENT_SHADER, text_fragment_shader);
+    engine->text_program = glCreateProgram();
+    glAttachShader(engine->text_program, text_vs);
+    glAttachShader(engine->text_program, text_fs);
+    glLinkProgram(engine->text_program);
+    engine->text_pos_loc = glGetAttribLocation(engine->text_program, "position");
+    engine->text_tex_loc = glGetAttribLocation(engine->text_program, "texcoord");
+    engine->text_color_uniform = glGetUniformLocation(engine->text_program, "u_color");
+
+    unsigned char* atlas_pixels = (unsigned char*)malloc(ATLAS_W * ATLAS_H);
+    memset(atlas_pixels, 0, ATLAS_W * ATLAS_H);
+    
+    unsigned char font_data[2048];
+    memset(font_data, 0, sizeof(font_data));
+    memcpy(font_data, ttf_fallback, sizeof(ttf_fallback));
+    
+    stbtt_BakeFontBitmap(font_data, 0, 32.0f, atlas_pixels, ATLAS_W, ATLAS_H, 32, 96, engine->baked_chars);
+
+    glGenTextures(1, &engine->font_texture);
+    glBindTexture(GL_TEXTURE_2D, engine->font_texture);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE, ATLAS_W, ATLAS_H, 0, GL_LUMINANCE, GL_UNSIGNED_BYTE, atlas_pixels);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    free(atlas_pixels);
+
     clock_gettime(CLOCK_MONOTONIC, &engine->last_time);
     clock_gettime(CLOCK_MONOTONIC, &engine->start_time);
     engine->frame_count = 0;
@@ -123,29 +197,47 @@ void draw_cube_let(Engine* engine, float tx, float ty, float tz, float* view_pro
     glDrawElements(GL_TRIANGLES, 36, GL_UNSIGNED_SHORT, indices);
 }
 
-void draw_hud_digit(Engine* engine, int digit, float x, float y) {
-    float w = 0.04f, h = 0.08f;
-    float segments[7][6] = {
-        {x,y+h, x+w,y+h}, {x+w,y+h, x+w,y+h/2}, {x+w,y+h/2, x+w,y},
-        {x,y, x+w,y}, {x,y, x,y+h/2}, {x,y+h/2, x,y+h}, {x,y+h/2, x+w,y+h/2}
-    };
-    int patterns[10][7] = {
-        {1,1,1,1,1,1,0}, {0,1,1,0,0,0,0}, {1,1,0,1,1,0,1}, {1,1,1,1,0,0,1}, {0,1,1,0,0,1,1},
-        {1,0,1,1,0,1,1}, {1,0,1,1,1,1,1}, {1,1,1,0,0,0,0}, {1,1,1,1,1,1,1}, {1,1,1,1,0,1,1}
-    };
-    float color[8] = {0.0f,1.0f,0.0f,1.0f, 0.0f,1.0f,0.0f,1.0f};
-    float identity[16];
-    make_identity(identity);
-    glUniformMatrix4fv(engine->mvp_loc, 1, GL_FALSE, identity);
-    glVertexAttribPointer(engine->color_loc, 4, GL_FLOAT, GL_FALSE, 0, color);
-    glEnableVertexAttribArray(engine->color_loc);
+void render_string(Engine* engine, const char* text, float x, float y) {
+    glUseProgram(engine->text_program);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, engine->font_texture);
+    glUniform4f(engine->text_color_uniform, 0.0f, 1.0f, 0.0f, 1.0f);
 
-    for (int i = 0; i < 7; i++) {
-        if (patterns[digit][i]) {
-            glVertexAttribPointer(engine->position_loc, 2, GL_FLOAT, GL_FALSE, 0, segments[i]);
-            glEnableVertexAttribArray(engine->position_loc);
-            glDrawArrays(GL_LINES, 0, 2);
+    float sx = 2.0f / engine->width;
+    float sy = 2.0f / engine->height;
+
+    while (*text) {
+        if (*text >= 32 && *text < 128) {
+            stbtt_bakedchar *b = engine->baked_chars + (*text - 32);
+            int round_x = (int)floor(x + b->xoff);
+            int round_y = (int)floor(y - b->yoff);
+            
+            float x0 = round_x * sx;
+            float y0 = round_y * sy;
+            float x1 = (round_x + b->x1 - b->x0) * sx;
+            float y1 = (round_y - (b->y1 - b->y0)) * sy;
+
+            float u0 = b->x0 / (float)ATLAS_W;
+            float v0 = b->y0 / (float)ATLAS_H;
+            float u1 = b->x1 / (float)ATLAS_W;
+            float v1 = b->y1 / (float)ATLAS_H;
+
+            float vertices[16] = {
+                x0, y0, u0, v0,
+                x1, y0, u1, v0,
+                x0, y1, u0, v1,
+                x1, y1, u1, v1
+            };
+
+            glVertexAttribPointer(engine->text_pos_loc, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), vertices);
+            glEnableVertexAttribArray(engine->text_pos_loc);
+            glVertexAttribPointer(engine->text_tex_loc, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), &vertices[2]);
+            glEnableVertexAttribArray(engine->text_tex_loc);
+            glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+
+            x += b->xadvance;
         }
+        text++;
     }
 }
 
@@ -183,10 +275,14 @@ void draw_frame(Engine* engine) {
     }
 
     glDisable(GL_DEPTH_TEST);
-    int fps = (int)engine->current_fps;
-    draw_hud_digit(engine, (fps / 100) % 10, -0.9f, 0.8f);
-    draw_hud_digit(engine, (fps / 10) % 10, -0.83f, 0.8f);
-    draw_hud_digit(engine, fps % 10, -0.76f, 0.8f);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    char out_str[32];
+    snprintf(out_str, sizeof(out_str), "FPS: %.1f", engine->current_fps);
+    render_string(engine, out_str, 20.0f, engine->height - 50.0f);
+
+    glDisable(GL_BLEND);
     glEnable(GL_DEPTH_TEST);
 
     eglSwapBuffers(engine->display, engine->surface);
