@@ -13,11 +13,14 @@
 #define LOG_TAG "Box3D"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 
-#define STB_TRUETYPE_IMPLEMENTATION
-#include "stb_truetype.h"
-
-#define ATLAS_W 512
-#define ATLAS_H 512
+#define GL_CHECK(x) \
+    x; \
+    { \
+        GLenum glError = glGetError(); \
+        if (glError != GL_NO_ERROR) { \
+            LOGI("glGetError() = %i (0x%.8x) at %s:%i\n", glError, glError, __FILE__, __LINE__); \
+        } \
+    }
 
 typedef struct {
     ANativeWindow* window;
@@ -26,6 +29,7 @@ typedef struct {
     EGLContext context;
     int32_t width;
     int32_t height;
+    
     GLuint program;
     GLuint position_loc;
     GLuint color_loc;
@@ -36,7 +40,6 @@ typedef struct {
     GLuint text_tex_loc;
     GLuint text_color_uniform;
     GLuint font_texture;
-    stbtt_bakedchar baked_chars[96];
 
     struct timespec last_time;
     struct timespec start_time;
@@ -82,18 +85,13 @@ static const char* text_fragment_shader =
     "  gl_FragColor = vec4(u_color.rgb, u_color.a * mask);\n"
     "}\n";
 
-static const unsigned char ttf_fallback[164] = {
-    0x00,0x01,0x00,0x00,0x00,0x03,0x00,0x20,0x00,0x00,0x00,0x04,0x63,0x6d,0x61,0x70,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x3c,0x00,0x00,0x00,0x24,0x67,0x6c,0x79,0x66,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x60,0x00,0x00,0x00,0x24,0x68,0x65,0x61,0x64,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x84,0x00,0x00,0x00,0x36,0x00,0x01,0x00,0x00,
-    0x00,0x01,0x00,0x00,0x00,0x00,0x00,0x14,0x00,0x03,0x00,0x00,0x00,0x00,0x00,0x10,
-    0x00,0x04,0x00,0x0c,0x00,0x00,0x00,0x04,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x01,0x00,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x04,0x00,0x01,0x00,0x00,
-    0x00,0x01,0x00,0x00,0x00,0x00,0x00,0x10,0x00,0x01,0x00,0x00,0x00,0x00,0x00,0x04,
-    0x00,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00
+static const unsigned char font_bits[96][5] = {
+    {0x00,0x00,0x00,0x00,0x00},{0x00,0x00,0xfa,0x00,0x00},{0x00,0xe0,0x00,0xe0,0x00},{0x28,0xfe,0x28,0xfe,0x28},{0x24,0x54,0xfe,0x54,0x48},{0xc4,0xc8,0x10,0x26,0x46},{0x6c,0x92,0xaa,0x44,0x0a},{0x00,0xa0,0xc0,0x00,0x00},{0x00,0x38,0x44,0x82,0x00},{0x00,0x82,0x44,0x38,0x00},{0x28,0x10,0x7c,0x10,0x28},{0x10,0x10,0x7c,0x10,0x10},{0x00,0x0a,0x0c,0x00,0x00},{0x10,0x10,0x10,0x10,0x10},{0x00,0x06,0x06,0x00,0x00},{0x04,0x08,0x10,0x20,0x40},
+    {0x7c,0x8a,0x92,0xa2,0x7c},{0x00,0x42,0xfe,0x02,0x00},{0x42,0x86,0x8a,0x92,0x62},{0x84,0x82,0xa2,0xd2,0x8c},{0x18,0x28,0x48,0xfe,0x08},{0xe4,0xa2,0xa2,0xa2,0x9c},{0x3c,0x52,0x92,0x92,0x0c},{0x80,0x86,0x98,0xe0,0x80},{0x6c,0x92,0x92,0x92,0x6c},{0x60,0x92,0x92,0x94,0x78},{0x00,0x6c,0x6c,0x00,0x00},{0x00,0xaa,0x6c,0x00,0x00},{0x10,0x28,0x44,0x82,0x00},{0x24,0x24,0x24,0x24,0x24},{0x00,0x82,0x44,0x28,0x10},{0x40,0x80,0x8a,0x90,0x60},
+    {0x4c,0x92,0x9e,0x82,0x7c},{0x7e,0x88,0x88,0x88,0x7e},{0xfe,0x92,0x92,0x92,0x6c},{0x7c,0x82,0x82,0x82,0x44},{0xfe,0x82,0x82,0x44,0x38},{0xfe,0x92,0x92,0x92,0x82},{0xfe,0x90,0x90,0x90,0x80},{0x7c,0x82,0x92,0x92,0x5e},{0xfe,0x10,0x10,0x10,0xfe},{0x00,0x82,0xfe,0x82,0x00},{0x06,0x02,0x82,0xfe,0x80},{0xfe,0x10,0x28,0x44,0x82},{0xfe,0x02,0x02,0x02,0x02},{0xfe,0x40,0x30,0x40,0xfe},{0xfe,0x20,0x10,0x08,0xfe},{0x7c,0x82,0x82,0x82,0x7c},
+    {0xfe,0x90,0x90,0x90,0x60},{0x7c,0x82,0x8a,0x84,0x7a},{0xfe,0x90,0x98,0x94,0x62},{0x62,0x92,0x92,0x92,0x8c},{0x80,0x80,0xfe,0x80,0x80},{0xfc,0x02,0x02,0x02,0xfc},{0xf8,0x04,0x02,0x04,0xf8},{0xfc,0x02,0x3c,0x02,0xfc},{0xc6,0x28,0x10,0x28,0xc6},{0xe0,0x10,0x0e,0x10,0xe0},{0x86,0x8a,0x92,0xa2,0xc2},{0x00,0xfe,0x82,0x82,0x00},{0x40,0x20,0x10,0x08,0x04},{0x00,0x82,0x82,0xfe,0x00},{0x20,0x40,0x80,0x40,0x20},{0x02,0x02,0x02,0x02,0x02},
+    {0x00,0x01,0x02,0x04,0x00},{0x04,0x2a,0x2a,0x2a,0x1f},{0xfe,0x12,0x22,0x22,0x1c},{0x1c,0x22,0x22,0x22,0x04},{0x1c,0x22,0x22,0x12,0xfe},{0x1c,0x2a,0x2a,0x2a,0x18},{0x10,0x7e,0x90,0x80,0x40},{0x30,0x4a,0x4a,0x4a,0x7c},{0xfe,0x10,0x20,0x20,0xdf},{0x00,0x22,0xbe,0x02,0x00},{0x04,0x02,0x22,0xbc,0x00},{0xfe,0x08,0x14,0x22,0x00},{0x00,0x82,0xfe,0x02,0x00},{0x3e,0x20,0x18,0x20,0x1e},{0x3e,0x10,0x20,0x20,0x1f},{0x1c,0x22,0x22,0x22,0x1c},
+    {0x3f,0x24,0x24,0x24,0x18},{0x18,0x24,0x24,0x24,0x3f},{0x3e,0x10,0x20,0x20,0x10},{0x12,0x2a,0x2a,0x2a,0x24},{0x10,0x7c,0x12,0x02,0x04},{0x3e,0x02,0x02,0x02,0x3e},{0x38,0x06,0x01,0x06,0x38},{0x3c,0x02,0x1c,0x02,0x3c},{0x22,0x14,0x08,0x14,0x22},{0x30,0x0a,0x0a,0x0a,0x3c},{0x22,0x26,0x2a,0x32,0x22},{0x10,0x10,0x6c,0x82,0x00},{0x00,0x00,0xfe,0x00,0x00},{0x00,0x82,0x6c,0x10,0x10},{0x10,0x10,0x28,0x44,0x00},{0x00,0x00,0x00,0x00,0x00}
 };
 
 GLuint load_shader(GLenum type, const char* shader_src) {
@@ -124,27 +122,39 @@ void init_gl(Engine* engine) {
     engine->text_tex_loc = glGetAttribLocation(engine->text_program, "texcoord");
     engine->text_color_uniform = glGetUniformLocation(engine->text_program, "u_color");
 
-    unsigned char* atlas_pixels = (unsigned char*)malloc(ATLAS_W * ATLAS_H);
-    memset(atlas_pixels, 0, ATLAS_W * ATLAS_H);
-    
-    unsigned char font_data[2048];
-    memset(font_data, 0, sizeof(font_data));
-    memcpy(font_data, ttf_fallback, sizeof(ttf_fallback));
-    
-    stbtt_BakeFontBitmap(font_data, 0, 32.0f, atlas_pixels, ATLAS_W, ATLAS_H, 32, 96, engine->baked_chars);
+    int tex_w = 128;
+    int tex_h = 64;
+    unsigned char* tex_data = (unsigned char*)malloc(tex_w * tex_h);
+    memset(tex_data, 0, tex_w * tex_h);
 
-    glGenTextures(1, &engine->font_texture);
-    glBindTexture(GL_TEXTURE_2D, engine->font_texture);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE, ATLAS_W, ATLAS_H, 0, GL_LUMINANCE, GL_UNSIGNED_BYTE, atlas_pixels);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    free(atlas_pixels);
+    for (int i = 0; i < 96; i++) {
+        int cx = (i % 16) * 8;
+        int cy = (i / 16) * 10;
+        for (int x = 0; x < 5; x++) {
+            unsigned char bits = font_bits[i][x];
+            for (int y = 0; y < 8; y++) {
+                if ((bits >> y) & 1) {
+                    int px = cx + x;
+                    int py = cy + (7 - y);
+                    tex_data[py * tex_w + px] = 255;
+                }
+            }
+        }
+    }
+
+    GL_CHECK(glGenTextures(1, &engine->font_texture));
+    GL_CHECK(glBindTexture(GL_TEXTURE_2D, engine->font_texture));
+    GL_CHECK(glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE, tex_w, tex_h, 0, GL_LUMINANCE, GL_UNSIGNED_BYTE, tex_data));
+    GL_CHECK(glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST));
+    GL_CHECK(glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST));
+    GL_CHECK(glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE));
+    GL_CHECK(glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE));
+    free(tex_data);
 
     clock_gettime(CLOCK_MONOTONIC, &engine->last_time);
     clock_gettime(CLOCK_MONOTONIC, &engine->start_time);
     engine->frame_count = 0;
     engine->current_fps = 0.0f;
-    glEnable(GL_DEPTH_TEST);
 }
 
 void calculate_fps(Engine* engine) {
@@ -189,63 +199,71 @@ void draw_cube_let(Engine* engine, float tx, float ty, float tz, float* view_pro
         12,13,14, 12,14,15, 16,17,18, 16,18,19, 20,21,22, 20,22,23
     };
 
-    glUniformMatrix4fv(engine->mvp_loc, 1, GL_FALSE, view_projection);
-    glVertexAttribPointer(engine->position_loc, 3, GL_FLOAT, GL_FALSE, 0, vertices);
-    glEnableVertexAttribArray(engine->position_loc);
-    glVertexAttribPointer(engine->color_loc, 4, GL_FLOAT, GL_FALSE, 0, colors);
-    glEnableVertexAttribArray(engine->color_loc);
-    glDrawElements(GL_TRIANGLES, 36, GL_UNSIGNED_SHORT, indices);
+    GL_CHECK(glUniformMatrix4fv(engine->mvp_loc, 1, GL_FALSE, view_projection));
+    GL_CHECK(glVertexAttribPointer(engine->position_loc, 3, GL_FLOAT, GL_FALSE, 0, vertices));
+    GL_CHECK(glEnableVertexAttribArray(engine->position_loc));
+    GL_CHECK(glVertexAttribPointer(engine->color_loc, 4, GL_FLOAT, GL_FALSE, 0, colors);)
+    GL_CHECK(glEnableVertexAttribArray(engine->color_loc));
+    GL_CHECK(glDrawElements(GL_TRIANGLES, 36, GL_UNSIGNED_SHORT, indices));
 }
 
-void render_string(Engine* engine, const char* text, float x, float y) {
-    glUseProgram(engine->text_program);
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, engine->font_texture);
-    glUniform4f(engine->text_color_uniform, 0.0f, 1.0f, 0.0f, 1.0f);
+void render_string(Engine* engine, const char* text, float screen_x, float screen_y, float scale) {
+    GL_CHECK(glUseProgram(engine->text_program));
+    GL_CHECK(glActiveTexture(GL_TEXTURE0));
+    GL_CHECK(glBindTexture(GL_TEXTURE_2D, engine->font_texture));
+    GL_CHECK(glUniform4f(engine->text_color_uniform, 0.0f, 1.0f, 1.0f, 1.0f));
 
-    float sx = 2.0f / engine->width;
-    float sy = 2.0f / engine->height;
+    float char_w_pixels = 6.0f * scale;
+    float char_h_pixels = 9.0f * scale;
+    float step_x = char_w_pixels / (engine->width / 2.0f);
+    
+    float start_x = (screen_x / (engine->width / 2.0f)) - 1.0f;
+    float start_y = (screen_y / (engine->height / 2.0f)) - 1.0f;
+    
+    float w = char_w_pixels / (engine->width / 2.0f);
+    float h = char_h_pixels / (engine->height / 2.0f);
+
+    int tex_w = 128;
+    int tex_h = 64;
 
     while (*text) {
-        if (*text >= 32 && *text < 128) {
-            stbtt_bakedchar *b = engine->baked_chars + (*text - 32);
-            int round_x = (int)floor(x + b->xoff);
-            int round_y = (int)floor(y - b->yoff);
-            
-            float x0 = round_x * sx;
-            float y0 = round_y * sy;
-            float x1 = (round_x + b->x1 - b->x0) * sx;
-            float y1 = (round_y - (b->y1 - b->y0)) * sy;
+        int ascii = (int)(*text);
+        if (ascii >= 32 && ascii < 128) {
+            int idx = ascii - 32;
+            int cx = (idx % 16) * 8;
+            int cy = (idx / 16) * 10;
 
-            float u0 = b->x0 / (float)ATLAS_W;
-            float v0 = b->y0 / (float)ATLAS_H;
-            float u1 = b->x1 / (float)ATLAS_W;
-            float v1 = b->y1 / (float)ATLAS_H;
+            float u0 = (float)cx / tex_w;
+            float v0 = (float)cy / tex_h;
+            float u1 = (float)(cx + 6) / tex_w;
+            float v1 = (float)(cy + 9) / tex_h;
 
             float vertices[16] = {
-                x0, y0, u0, v0,
-                x1, y0, u1, v0,
-                x0, y1, u0, v1,
-                x1, y1, u1, v1
+                start_x,     start_y + h, u0, v0,
+                start_x + w, start_y + h, u1, v0,
+                start_x,     start_y,     u0, v1,
+                start_x + w, start_y,     u1, v1
             };
 
-            glVertexAttribPointer(engine->text_pos_loc, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), vertices);
-            glEnableVertexAttribArray(engine->text_pos_loc);
-            glVertexAttribPointer(engine->text_tex_loc, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), &vertices[2]);
-            glEnableVertexAttribArray(engine->text_tex_loc);
-            glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+            GL_CHECK(glVertexAttribPointer(engine->text_pos_loc, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), vertices));
+            GL_CHECK(glEnableVertexAttribArray(engine->text_pos_loc));
+            GL_CHECK(glVertexAttribPointer(engine->text_tex_loc, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), &vertices[2]));
+            GL_CHECK(glEnableVertexAttribArray(engine->text_tex_loc));
+            GL_CHECK(glDrawArrays(GL_TRIANGLE_STRIP, 0, 4));
 
-            x += b->xadvance;
+            start_x += step_x;
         }
         text++;
     }
 }
 
 void draw_frame(Engine* engine) {
-    glViewport(0, 0, engine->width, engine->height);
-    glClearColor(0.02f, 0.02f, 0.02f, 1.0f);
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-    glUseProgram(engine->program);
+    GL_CHECK(glViewport(0, 0, engine->width, engine->height));
+    GL_CHECK(glClearColor(0.2f, 0.2f, 0.2f, 1.0f));
+    GL_CHECK(glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT));
+    
+    GL_CHECK(glEnable(GL_DEPTH_TEST));
+    GL_CHECK(glUseProgram(engine->program));
 
     struct timespec curr;
     clock_gettime(CLOCK_MONOTONIC, &curr);
@@ -274,16 +292,18 @@ void draw_frame(Engine* engine) {
         draw_cube_let(engine, offsets[i][0], offsets[i][1], offsets[i][2], r);
     }
 
-    glDisable(GL_DEPTH_TEST);
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    GL_CHECK(glDisable(GL_DEPTH_TEST));
+    GL_CHECK(glEnable(GL_BLEND));
+    GL_CHECK(glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
 
-    char out_str[32];
+    char out_str[64];
+    snprintf(out_str, sizeof(out_str), "Adreno (TM) 710");
+    render_string(engine, out_str, 40.0f, engine->height - 80.0f, 6.0f);
+
     snprintf(out_str, sizeof(out_str), "FPS: %.1f", engine->current_fps);
-    render_string(engine, out_str, 20.0f, engine->height - 50.0f);
+    render_string(engine, out_str, 40.0f, engine->height - 160.0f, 6.0f);
 
-    glDisable(GL_BLEND);
-    glEnable(GL_DEPTH_TEST);
+    GL_CHECK(glDisable(GL_BLEND));
 
     eglSwapBuffers(engine->display, engine->surface);
 }
